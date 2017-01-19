@@ -74,6 +74,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"errors"
 
 	log "github.com/Sirupsen/logrus"
 )
@@ -89,52 +90,46 @@ type Vagrant struct {
 	nodes         map[string]TestbedNode
 }
 
-// setup brings up a vagrant testbed. `start` means to run `vagrant up`. env is
-// a string of values to prefix before each command run on each SSHNode.
-// numNodes is the number of nodes you want to track: these will be scanned
-// from the vagrant file sequentially.
-func (v *Vagrant) setup(start bool, env []string, numNodes int) error {
+// start starts the vagrant nodes
+func (v *Vagrant) start(env []string) error {
+	vCmd := &VagrantCommand{}
+	vCmd.Env = append(vCmd.Env, env...)
+	output, err := vCmd.RunWithOutput("up")
+	if err != nil {
+		log.Errorf("Vagrant up failed. Error: %s Output: \n%s\n",
+			err, output)
+	}
+
+	return err
+}
+
+// getNodeNames brings up the vagrant nodes and return a list of names
+func (v *Vagrant) getNodeNames(env []string, numNodes int) ([]string, error) {
+	nodeNames := []string{}
 	v.nodes = map[string]TestbedNode{}
 
 	vCmd := &VagrantCommand{ContivNodes: numNodes}
 	vCmd.Env = append(vCmd.Env, env...)
-
-	if start {
-		output, err := vCmd.RunWithOutput("up")
-		if err != nil {
-			log.Errorf("Vagrant up failed. Error: %s Output: \n%s\n",
-				err, output)
-			return err
-		}
-
-		defer func() {
-			if err != nil {
-				v.Teardown()
-			}
-		}()
-	}
-
 	v.expectedNodes = numNodes
 
 	output, err := vCmd.RunWithOutput("status")
 	if err != nil {
 		log.Errorf("Vagrant status failed. Error: %s Output: \n%s\n",
 			err, output)
-		return err
+		return nodeNames, err
 	}
 
 	// now some hardwork of finding the names of the running nodes from status output
 	re, err := regexp.Compile("[a-zA-Z0-9_\\- ]*running ")
 	if err != nil {
-		return err
+		return nodeNames, err
 	}
 	nodeNamesBytes := re.FindAll(output, -1)
 	if nodeNamesBytes == nil {
 		err = fmt.Errorf("no running nodes found in vagrant status output: %s",
 			output)
-		return err
+		return nodeNames, err
 	}
-	nodeNames := []string{}
 	for _, nodeNameByte := range nodeNamesBytes {
 		nodeName := strings.Fields(string(nodeNameByte))[0]
 		nodeNames = append(nodeNames, nodeName)
@@ -143,18 +138,36 @@ func (v *Vagrant) setup(start bool, env []string, numNodes int) error {
 	if len(nodeNames) != numNodes {
 		err = fmt.Errorf("number of running node(s) (%d) is not equal to number of expected node(s) (%d) in vagrant status output: %s",
 			len(nodeNames), numNodes, output)
-		return err
+		return nodeNames, err
 	}
+
+	return nodeNames, nil
+}
+
+// setup brings up a vagrant testbed. env is
+// a string of values to prefix before each command run on each SSHNode.
+// numNodes is the number of nodes you want to track: these will be scanned
+// from the vagrant file sequentially.
+func (v *Vagrant) setup(env, nodeNames []string) error {
+	v.nodes = map[string]TestbedNode{}
+	numNodes := len(nodeNames)
+
+	vCmd := &VagrantCommand{ContivNodes: numNodes}
+	vCmd.Env = append(vCmd.Env, env...)
+
+	v.expectedNodes = numNodes
 
 	// some more work to figure the ssh port and private key details
 	// XXX: vagrant ssh-config --host <> seems to be broken as-in it doesn't
 	// correctly filter the output based on passed host-name. So filtering
 	// the output ourselves below.
-	if output, err = vCmd.RunWithOutput("ssh-config"); err != nil {
+	output, err := vCmd.RunWithOutput("ssh-config")
+	if err != nil {
 		return fmt.Errorf("error running vagrant ssh-config. Error: %s. Output: %s", err, output)
 	}
 
-	if re, err = regexp.Compile("Host [a-zA-Z0-9_-]+|HostName.*|Port [0-9]+|IdentityFile .*"); err != nil {
+	re, err := regexp.Compile("Host [a-zA-Z0-9_-]+|HostName.*|Port [0-9]+|IdentityFile .*") 
+	if err != nil {
 		return err
 	}
 
@@ -211,17 +224,48 @@ func (v *Vagrant) setup(start bool, env []string, numNodes int) error {
 
 // Setup initializes a vagrant testbed.
 func (v *Vagrant) Setup(args ...interface{}) error {
-	if _, ok := args[0].(bool); !ok {
-		return unexpectedSetupArgError("bool, string, int", args...)
-	}
-	if _, ok := args[1].([]string); !ok {
-		return unexpectedSetupArgError("bool, string, int", args...)
-	}
-	if _, ok := args[2].(int); !ok {
+	err := errors.New("")
+	start, ok := args[0].(bool)
+	if !ok {
 		return unexpectedSetupArgError("bool, string, int", args...)
 	}
 
-	return v.setup(args[0].(bool), args[1].([]string), args[2].(int))
+	env, ok := args[1].([]string)
+	if !ok {
+		return unexpectedSetupArgError("bool, string, int", args...)
+	}
+
+	numNodes, ok := args[2].(int)
+	if !ok {
+		return unexpectedSetupArgError("bool, string, int", args...)
+	}
+
+	err = nil
+	if start {
+		v.start(env)
+		defer func() {
+			if err != nil {
+				v.Teardown()
+			}
+		}()
+	}
+
+	nodeNames := []string{}
+	if len(args) < 4  {
+		nodeNames, err = v.getNodeNames(env, numNodes)
+		if err != nil {
+			return err
+		}
+	} else {
+		nodeNames, ok = args[3].([]string)
+		if !ok || len(nodeNames) < 1 {
+			err = unexpectedSetupArgError("bool, string, int, string", args...)
+			return err
+		}
+	}
+
+	err = v.setup(env, nodeNames)
+	return err
 }
 
 // Teardown cleans up a vagrant testbed. It performs `vagrant destroy -f` to

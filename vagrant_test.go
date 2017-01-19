@@ -51,6 +51,22 @@ func (v *vagrantTestSuite) TestRunEnv(c *C) {
 	}
 }
 
+func (v *vagrantTestSuite) TestRunEnvNodeList(c *C) {
+	vagrant := &Vagrant{}
+	c.Assert(vagrant.Setup(false, []string{"MYENV=bar"}, 3, []string{"host0","host1"}), IsNil)
+	outChan := make(chan string, 2)
+
+	c.Assert(vagrant.IterateNodes(func(node TestbedNode) error {
+		out, err := node.RunCommandWithOutput("echo $MYENV")
+		outChan <- out
+		return err
+	}), IsNil)
+
+	for x := 0; x < 2; x++ {
+		c.Assert(strings.TrimSpace(<-outChan), Equals, "bar")
+	}
+}
+
 func (v *vagrantTestSuite) TestSetupInvalidArgs(c *C) {
 	vagrant := &Vagrant{}
 	c.Assert(vagrant.Setup(1, "foo"), ErrorMatches, "unexpected args to Setup.*Expected:.*Received:.*")
